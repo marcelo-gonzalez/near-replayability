@@ -370,10 +370,10 @@ impl ProcessPool {
         let mut result = Ok(());
 
         loop {
-            if quit.load(Ordering::Relaxed) {
-                return Ok(true);
-            }
-            if result.is_ok() && processes.len() < self.num_processes {
+            if !quit.load(Ordering::Relaxed)
+                && result.is_ok()
+                && processes.len() < self.num_processes
+            {
                 if let Some(job) = next_job {
                     processes.push(run_job(neard, home_dir, job, no_read_write).boxed());
                     next_job = it.next();
@@ -385,9 +385,10 @@ impl ProcessPool {
             if result.is_ok() && output.is_err() {
                 result = output;
             }
+            let got_sigint = quit.load(Ordering::Relaxed);
             // check next_job.is_none() for the special case when num_processes is 1
-            if (next_job.is_none() || result.is_err()) && futs.is_empty() {
-                return result.and(Ok(false));
+            if (next_job.is_none() || got_sigint || result.is_err()) && futs.is_empty() {
+                return result.and(Ok(got_sigint));
             }
             processes = futs;
         }
