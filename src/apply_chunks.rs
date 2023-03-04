@@ -303,12 +303,21 @@ struct ProcessPool {
     num_processes: usize,
 }
 
-async fn run_job(neard: &Path, home_dir: &Path, job: &mut Job) -> anyhow::Result<()> {
-    let output = async_process::Command::new(neard)
-        .arg("--unsafe-fast-startup")
+async fn run_job(
+    neard: &Path,
+    home_dir: &Path,
+    job: &mut Job,
+    no_read_write: bool,
+) -> anyhow::Result<()> {
+    let mut cmd = async_process::Command::new(neard);
+    cmd.arg("--unsafe-fast-startup")
         .arg("--home")
         .arg(home_dir)
-        .arg("view-state")
+        .arg("view-state");
+    if !no_read_write {
+        cmd.arg("--readwrite");
+    }
+    let output = cmd
         .arg("apply")
         .arg("--height")
         .arg(job.height.to_string())
@@ -351,6 +360,7 @@ impl ProcessPool {
         neard: &Path,
         home_dir: &Path,
         jobs: &mut [Job],
+        no_read_write: bool,
         quit: &AtomicBool,
     ) -> anyhow::Result<bool> {
         assert!(!jobs.is_empty());
@@ -365,7 +375,7 @@ impl ProcessPool {
             }
             if result.is_ok() && processes.len() < self.num_processes {
                 if let Some(job) = next_job {
-                    processes.push(run_job(neard, home_dir, job).boxed());
+                    processes.push(run_job(neard, home_dir, job, no_read_write).boxed());
                     next_job = it.next();
                     continue;
                 }
@@ -389,6 +399,7 @@ pub(crate) async fn apply_chunks(
     neard_path: &Path,
     home_dir: &Path,
     num_processes: usize,
+    no_read_write: bool,
 ) -> anyhow::Result<()> {
     let mut neard = NeardPath::new(neard_path)?;
     neard.insert_version(db).await?;
@@ -417,7 +428,9 @@ pub(crate) async fn apply_chunks(
             tracing::info!(target: "near-replayability", "no more jobs left to do");
             return Ok(());
         }
-        let sigint_received = pool.run_jobs(&neard.path, home_dir, &mut jobs, &quit).await;
+        let sigint_received = pool
+            .run_jobs(&neard.path, home_dir, &mut jobs, no_read_write, &quit)
+            .await;
         match sigint_received {
             Ok(false) => update_jobs(db, jobs, neard.version_hash).await?,
             Ok(true) => {
@@ -459,7 +472,7 @@ pub(crate) async fn test_parallelism(
     });
 
     let start = Instant::now();
-    pool.run_jobs(neard_path, home_dir, &mut jobs, &quit)
+    pool.run_jobs(neard_path, home_dir, &mut jobs, true, &quit)
         .await?;
     println!("took {:?}", Instant::now() - start);
     Ok(())

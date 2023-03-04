@@ -13,6 +13,8 @@ struct RunCmd {
     home_dir: PathBuf,
     #[clap(long)]
     num_processes: Option<usize>,
+    #[clap(long)]
+    no_read_write: bool,
 }
 
 #[derive(clap::Parser)]
@@ -67,12 +69,19 @@ async fn main() -> anyhow::Result<()> {
 
     match cmd.subcommand {
         SubCmd::Run(cmd) => {
-            let num_processes = cmd.num_processes.unwrap_or_else(num_cpus::get);
+            let num_processes = cmd.num_processes.unwrap_or_else(|| {
+                if cmd.no_read_write {
+                    num_cpus::get()
+                } else {
+                    1
+                }
+            });
             apply_chunks::apply_chunks(
                 &db_connect().await?,
                 &cmd.neard_path,
                 &cmd.home_dir,
                 num_processes,
+                cmd.no_read_write,
             )
             .await
         }
