@@ -7,13 +7,16 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1.0.69"
+async-process = "1.6.0"
 clap = { version = "3.1.6", features = ["derive", "env"] }
 sqlx = { version = "0.5", features = [ "runtime-tokio-native-tls", "postgres", "offline" ] }
 dotenv = "0.15.0"
+futures = "0.3"
 log = "0.4.17"
 md5 = "0.7.0"
 near-jsonrpc-client = "0.5.0"
 near-primitives = "0.16.0"
+num_cpus = "1.15.0"
 simple_logger = "4.0.0"
 tokio = "*"
 tracing = "0.1.37"

@@ -1,11 +1,11 @@
 use anyhow::Context;
+use futures::FutureExt;
 use sqlx::postgres::PgPool;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::SystemTime;
+use std::time::{Instant, SystemTime};
 
 struct NeardPath {
     path: PathBuf,
@@ -30,7 +30,7 @@ impl NeardPath {
     }
 
     fn load_version(&mut self) -> anyhow::Result<()> {
-        let output = Command::new(&self.path)
+        let output = std::process::Command::new(&self.path)
             .arg("--version")
             .output()
             .with_context(|| format!("failed executing {}", self.path.display()))?;
@@ -75,7 +75,7 @@ impl NeardPath {
 }
 
 #[allow(non_camel_case_types)]
-#[derive(PartialEq, Eq, Debug, sqlx::Type)]
+#[derive(PartialEq, Eq, Clone, Debug, sqlx::Type)]
 #[sqlx(type_name = "apply_status")]
 enum ApplyStatus {
     ok,
@@ -84,7 +84,7 @@ enum ApplyStatus {
     height_missing,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 struct Job {
     epoch_id: String,
     height: i64,
@@ -276,10 +276,119 @@ async fn delete_jobs(
     Ok(())
 }
 
+async fn delete_and_update_jobs(
+    db: &PgPool,
+    jobs: Vec<Job>,
+    neard_version_hash: i32,
+) -> anyhow::Result<()> {
+    let mut still_pending = Vec::new();
+    let mut finished = Vec::new();
+    for j in jobs {
+        if j.status == ApplyStatus::pending {
+            still_pending.push(j);
+        } else {
+            finished.push(j);
+        }
+    }
+    if !still_pending.is_empty() {
+        delete_jobs(db, still_pending, neard_version_hash).await?;
+    }
+    if !finished.is_empty() {
+        update_jobs(db, finished, neard_version_hash).await?;
+    }
+    Ok(())
+}
+
+struct ProcessPool {
+    num_processes: usize,
+}
+
+async fn run_job(neard: &Path, home_dir: &Path, job: &mut Job) -> anyhow::Result<()> {
+    let output = async_process::Command::new(neard)
+        .arg("--unsafe-fast-startup")
+        .arg("--home")
+        .arg(home_dir)
+        .arg("view-state")
+        .arg("apply")
+        .arg("--height")
+        .arg(job.height.to_string())
+        .arg("--shard-id")
+        .arg(job.shard_id.to_string())
+        .output()
+        .await
+        .with_context(|| format!("failed executing {} view-state apply", neard.display()))?;
+    if output.status.success() {
+        job.status = ApplyStatus::ok;
+    } else {
+        match String::from_utf8(output.stderr) {
+            Ok(stderr) => {
+                // this is pretty ugly but idk how else to do it for now
+                if stderr.contains("DBNotFoundErr(\"BLOCK HEIGHT:") {
+                    job.status = ApplyStatus::height_missing;
+                } else {
+                    tracing::info!(
+                        "failure at height {} shard_id {}:\n\n{}",
+                        job.height,
+                        job.shard_id,
+                        stderr
+                    );
+                    job.status = ApplyStatus::failed;
+                }
+            }
+            Err(_) => job.status = ApplyStatus::failed,
+        }
+    }
+    Ok(())
+}
+
+impl ProcessPool {
+    fn new(num_processes: usize) -> Self {
+        Self { num_processes }
+    }
+
+    async fn run_jobs(
+        &self,
+        neard: &Path,
+        home_dir: &Path,
+        jobs: &mut [Job],
+        quit: &AtomicBool,
+    ) -> anyhow::Result<bool> {
+        assert!(!jobs.is_empty());
+        let mut processes = Vec::with_capacity(self.num_processes);
+        let mut it = jobs.iter_mut();
+        let mut next_job = it.next();
+        let mut result = Ok(());
+
+        loop {
+            if quit.load(Ordering::Relaxed) {
+                return Ok(true);
+            }
+            if result.is_ok() && processes.len() < self.num_processes {
+                if let Some(job) = next_job {
+                    processes.push(run_job(neard, home_dir, job).boxed());
+                    next_job = it.next();
+                    continue;
+                }
+            }
+
+            let (output, _, futs) = futures::future::select_all(processes).await;
+            if result.is_ok() && output.is_err() {
+                result = output;
+            }
+            // check next_job.is_none() for the special case when num_processes is 1
+            if (next_job.is_none() || result.is_err()) && futs.is_empty() {
+                return result.and(Ok(false));
+            }
+            processes = futs;
+        }
+    }
+}
+
 pub(crate) async fn apply_chunks(
     db: &PgPool,
     neard_path: &Path,
     home_dir: &Path,
+    num_processes: usize,
 ) -> anyhow::Result<()> {
     let mut neard = NeardPath::new(neard_path)?;
     neard.insert_version(db).await?;
@@ -291,70 +400,67 @@ pub(crate) async fn apply_chunks(
         quit2.store(true, Ordering::Relaxed);
     });
 
-    // TODO: parallelize
+    let pool = ProcessPool::new(num_processes);
+
     loop {
+        if quit.load(Ordering::Relaxed) {
+            return Ok(());
+        }
         // hopefully nobody will update it without stopping this program first, but check it
         // to at least catch it earlyish if it happens
         // TODO: right now we just continue taking undone work with the new neard version.
         // Should redo old chunks with the new one
         neard.reload_and_insert(db).await?;
+
         let mut jobs = next_jobs(db, neard.version_hash).await?;
         if jobs.is_empty() {
             tracing::info!(target: "near-replayability", "no more jobs left to do");
             return Ok(());
         }
-
-        for job in jobs.iter_mut() {
-            let output = Command::new(neard_path)
-                .arg("--unsafe-fast-startup")
-                .arg("--home")
-                .arg(home_dir)
-                .arg("view-state")
-                .arg("apply")
-                .arg("--height")
-                .arg(job.height.to_string())
-                .arg("--shard-id")
-                .arg(job.shard_id.to_string())
-                .output()
-                .with_context(|| {
-                    format!("failed executing {} view-state apply", neard.path.display())
-                })?;
-
-            if output.status.success() {
-                job.status = ApplyStatus::ok;
-            } else {
-                match String::from_utf8(output.stderr) {
-                    Ok(stderr) => {
-                        // this is pretty ugly but idk how else to do it for now
-                        if stderr.contains("DBNotFoundErr(\"BLOCK HEIGHT:") {
-                            job.status = ApplyStatus::height_missing;
-                        } else {
-                            job.status = ApplyStatus::failed;
-                        }
-                    }
-                    Err(_) => job.status = ApplyStatus::failed,
-                }
-            }
-
-            if quit.load(Ordering::Relaxed) {
-                let mut still_pending = Vec::new();
-                let mut finished = Vec::new();
-                for j in jobs {
-                    if j.status == ApplyStatus::pending {
-                        still_pending.push(j);
-                    } else {
-                        finished.push(j);
-                    }
-                }
-                if !still_pending.is_empty() {
-                    delete_jobs(db, still_pending, neard.version_hash).await?;
-                }
-                if !finished.is_empty() {
-                    update_jobs(db, finished, neard.version_hash).await?;
-                }
+        let sigint_received = pool.run_jobs(&neard.path, home_dir, &mut jobs, &quit).await;
+        match sigint_received {
+            Ok(false) => update_jobs(db, jobs, neard.version_hash).await?,
+            Ok(true) => {
+                delete_and_update_jobs(db, jobs, neard.version_hash).await?;
                 return Ok(());
             }
-        }
-        update_jobs(db, jobs, neard.version_hash).await?;
+            Err(e) => {
+                delete_and_update_jobs(db, jobs, neard.version_hash).await?;
+                return Err(e);
+            }
+        };
     }
+}
+
+pub(crate) async fn test_parallelism(
+    neard_path: &Path,
+    home_dir: &Path,
+    height: u64,
+    shard_id: u32,
+    total_applies: usize,
+    num_processes: usize,
+) -> anyhow::Result<()> {
+    let mut jobs = vec![
+        Job {
+            height: height.try_into().unwrap(),
+            shard_id: shard_id.try_into().unwrap(),
+            epoch_id: String::from("some_epoch_id"),
+            status: ApplyStatus::pending
+        };
+        total_applies
+    ];
+    let pool = ProcessPool::new(num_processes);
+
+    let quit = Arc::new(AtomicBool::new(false));
+    let quit2 = quit.clone();
+    let _sig = tokio::spawn(async move {
+        tokio::signal::ctrl_c().await.unwrap();
+        quit2.store(true, Ordering::Relaxed);
+    });
+
+    let start = Instant::now();
+    pool.run_jobs(neard_path, home_dir, &mut jobs, &quit)
+        .await?;
+    println!("took {:?}", Instant::now() - start);
+    Ok(())
 }
