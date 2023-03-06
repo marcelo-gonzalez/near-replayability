@@ -109,7 +109,8 @@ epoch_heights AS
 (
    SELECT
       id AS epoch_id,
-      generate_series(start_height, end_height) AS block_height 
+      height AS epoch_height,
+      generate_series(start_height, end_height) AS block_height
    FROM
       next_epoch 
 )
@@ -118,7 +119,7 @@ epoch_chunks AS
 (
    SELECT
       *,
-      generate_series(0, 3) AS shard_id 
+      generate_series(0, CASE WHEN epoch_height >= 997 THEN 3 ELSE 0 END) AS shard_id
    FROM
       epoch_heights 
 )
