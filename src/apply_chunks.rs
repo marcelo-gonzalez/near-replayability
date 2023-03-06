@@ -100,34 +100,34 @@ WITH next_epoch AS
    SELECT
       *
    FROM
-      epochs 
+      epochs
    ORDER BY
-      chunks_applied LIMIT 1 
+      chunks_applied LIMIT 1
 )
 ,
-epoch_heights AS 
+epoch_heights AS
 (
    SELECT
       id AS epoch_id,
       height AS epoch_height,
       generate_series(start_height, end_height) AS block_height
    FROM
-      next_epoch 
+      next_epoch
 )
 ,
-epoch_chunks AS 
+epoch_chunks AS
 (
    SELECT
       *,
       generate_series(0, CASE WHEN epoch_height >= 997 THEN 3 ELSE 0 END) AS shard_id
    FROM
-      epoch_heights 
+      epoch_heights
 )
 ,
-chunks_to_apply AS 
+chunks_to_apply AS
 (
    INSERT INTO
-      applied_chunks (height, shard_id, epoch_id, neard_version_hash, status, job_queued_at) 
+      applied_chunks (height, shard_id, epoch_id, neard_version_hash, status, job_queued_at)
       SELECT
          block_height,
          epoch_chunks.shard_id,
@@ -136,39 +136,39 @@ chunks_to_apply AS
          'pending',
          'now'
       FROM
-         epoch_chunks 
+         epoch_chunks
          LEFT JOIN
-            applied_chunks 
-            ON epoch_chunks.block_height = applied_chunks.height 
-            AND epoch_chunks.shard_id = applied_chunks.shard_id 
+            applied_chunks
+            ON epoch_chunks.block_height = applied_chunks.height
+            AND epoch_chunks.shard_id = applied_chunks.shard_id
       WHERE
          applied_chunks.height IS NULL LIMIT 50
       ON CONFLICT DO NOTHING RETURNING height, shard_id, epoch_id
 )
 ,
-epoch_count AS 
+epoch_count AS
 (
    UPDATE
-      epochs 
+      epochs
    SET
-      chunks_applied = new_count.count 
+      chunks_applied = new_count.count
    FROM
       (
          SELECT
             next_epoch.height,
-            next_epoch.chunks_applied + c.count AS count 
+            next_epoch.chunks_applied + c.count AS count
          FROM
-            next_epoch 
+            next_epoch
             CROSS JOIN
                (
                   SELECT
-                     COUNT(*) 
+                     COUNT(*)
                   FROM
                      chunks_to_apply
                )
                c
       )
-      new_count 
+      new_count
    WHERE
       epochs.height = new_count.height
 )
