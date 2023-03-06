@@ -17,33 +17,7 @@
     },
     "query": "INSERT INTO epochs (height, id, start_height, end_height, chunks_applied, chunk_application_failures) VALUES ($1, $2, $3, $4, $5, $6)\n            "
   },
-  "964afbffd6fe25e820629c09abfcc385c82826087420413a26fab6a1808e6ffa": {
-    "describe": {
-      "columns": [],
-      "nullable": [],
-      "parameters": {
-        "Left": [
-          "Int8",
-          "Text"
-        ]
-      }
-    },
-    "query": "UPDATE epochs SET chunk_application_failures = chunk_application_failures + $1 WHERE id = $2;"
-  },
-  "ad5b0356ed970519009332b0f6630b884344d8f0227bb4525ae25896d4ba3c60": {
-    "describe": {
-      "columns": [],
-      "nullable": [],
-      "parameters": {
-        "Left": [
-          "Int8",
-          "Text"
-        ]
-      }
-    },
-    "query": "UPDATE epochs SET chunks_applied = chunks_applied - $1 WHERE id = $2;"
-  },
-  "c049ab86eca4284f4be950914da83f5ded2af47ee67aa36c061459024b053e22": {
+  "1332e48391351d47e44a62681dbf1eec61576d877733e34837e4e59f17ab1e68": {
     "describe": {
       "columns": [
         {
@@ -73,7 +47,33 @@
         ]
       }
     },
-    "query": "\nWITH next_epoch AS\n(\n   SELECT\n      *\n   FROM\n      epochs \n   ORDER BY\n      chunks_applied LIMIT 1 \n)\n,\nepoch_heights AS \n(\n   SELECT\n      id AS epoch_id,\n      generate_series(start_height, end_height) AS block_height \n   FROM\n      next_epoch \n)\n,\nepoch_chunks AS \n(\n   SELECT\n      *,\n      generate_series(0, 3) AS shard_id \n   FROM\n      epoch_heights \n)\n,\nchunks_to_apply AS \n(\n   INSERT INTO\n      applied_chunks (height, shard_id, epoch_id, neard_version_hash, status, job_queued_at) \n      SELECT\n         block_height,\n         epoch_chunks.shard_id,\n         epoch_chunks.epoch_id,\n         $1,\n         'pending',\n         'now'\n      FROM\n         epoch_chunks \n         LEFT JOIN\n            applied_chunks \n            ON epoch_chunks.block_height = applied_chunks.height \n            AND epoch_chunks.shard_id = applied_chunks.shard_id \n      WHERE\n         applied_chunks.height IS NULL LIMIT 50\n      ON CONFLICT DO NOTHING RETURNING height, shard_id, epoch_id\n)\n,\nepoch_count AS \n(\n   UPDATE\n      epochs \n   SET\n      chunks_applied = new_count.count \n   FROM\n      (\n         SELECT\n            next_epoch.height,\n            next_epoch.chunks_applied + c.count AS count \n         FROM\n            next_epoch \n            CROSS JOIN\n               (\n                  SELECT\n                     COUNT(*) \n                  FROM\n                     chunks_to_apply\n               )\n               c\n      )\n      new_count \n   WHERE\n      epochs.height = new_count.height\n)\nSELECT * FROM chunks_to_apply;\n        "
+    "query": "\nWITH next_epoch AS\n(\n   SELECT\n      *\n   FROM\n      epochs\n   ORDER BY\n      chunks_applied LIMIT 1\n)\n,\nepoch_heights AS\n(\n   SELECT\n      id AS epoch_id,\n      height AS epoch_height,\n      generate_series(start_height, end_height) AS block_height\n   FROM\n      next_epoch\n)\n,\nepoch_chunks AS\n(\n   SELECT\n      *,\n      generate_series(0, CASE WHEN epoch_height >= 997 THEN 3 ELSE 0 END) AS shard_id\n   FROM\n      epoch_heights\n)\n,\nchunks_to_apply AS\n(\n   INSERT INTO\n      applied_chunks (height, shard_id, epoch_id, neard_version_hash, status, job_queued_at)\n      SELECT\n         block_height,\n         epoch_chunks.shard_id,\n         epoch_chunks.epoch_id,\n         $1,\n         'pending',\n         'now'\n      FROM\n         epoch_chunks\n         LEFT JOIN\n            applied_chunks\n            ON epoch_chunks.block_height = applied_chunks.height\n            AND epoch_chunks.shard_id = applied_chunks.shard_id\n      WHERE\n         applied_chunks.height IS NULL LIMIT 50\n      ON CONFLICT DO NOTHING RETURNING height, shard_id, epoch_id\n)\n,\nepoch_count AS\n(\n   UPDATE\n      epochs\n   SET\n      chunks_applied = new_count.count\n   FROM\n      (\n         SELECT\n            next_epoch.height,\n            next_epoch.chunks_applied + c.count AS count\n         FROM\n            next_epoch\n            CROSS JOIN\n               (\n                  SELECT\n                     COUNT(*)\n                  FROM\n                     chunks_to_apply\n               )\n               c\n      )\n      new_count\n   WHERE\n      epochs.height = new_count.height\n)\nSELECT * FROM chunks_to_apply;\n        "
+  },
+  "964afbffd6fe25e820629c09abfcc385c82826087420413a26fab6a1808e6ffa": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Int8",
+          "Text"
+        ]
+      }
+    },
+    "query": "UPDATE epochs SET chunk_application_failures = chunk_application_failures + $1 WHERE id = $2;"
+  },
+  "ad5b0356ed970519009332b0f6630b884344d8f0227bb4525ae25896d4ba3c60": {
+    "describe": {
+      "columns": [],
+      "nullable": [],
+      "parameters": {
+        "Left": [
+          "Int8",
+          "Text"
+        ]
+      }
+    },
+    "query": "UPDATE epochs SET chunks_applied = chunks_applied - $1 WHERE id = $2;"
   },
   "df481ad62dd6f3c11b9ef28ccffd566fad0dab119556457a268d96819d8209ce": {
     "describe": {
