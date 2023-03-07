@@ -69,6 +69,7 @@ impl NeardPath {
             tracing::warn!(target: "near-replayability", "neard version changed from under us!");
             self.load_version()?;
             self.insert_version(db).await?;
+            self.modified = modified;
         }
         Ok(())
     }
