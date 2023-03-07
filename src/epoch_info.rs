@@ -77,7 +77,7 @@ pub async fn populate(db: &PgPool, rpc_url: &str, head_height: u64) -> anyhow::R
             Err(e) => return Err(e).context("failed fetching last indexed epoch"),
         };
 
-    while start_block.header.prev_hash != Default::default() {
+    loop {
         // don't spam too hard
         tokio::time::sleep(Duration::from_millis(300)).await;
 
@@ -90,6 +90,9 @@ pub async fn populate(db: &PgPool, rpc_url: &str, head_height: u64) -> anyhow::R
             .await
             .with_context(|| format!("error fetching block {}", &start_block.header.prev_hash))?;
 
+        if prev_epoch_end.header.prev_hash == Default::default() {
+            break;
+        }
         let epoch_info = client
             .call(methods::validators::RpcValidatorRequest {
                 epoch_reference: EpochReference::BlockId(BlockId::Height(
